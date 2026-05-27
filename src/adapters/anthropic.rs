@@ -821,7 +821,7 @@ fn parse_anthropic_sse_line(line: &str) -> Result<StreamEvent, AdapterError> {
                     ContentDelta::InputJSONDelta { partial_json }
                 }
                 AnthropicDelta::ThinkingDelta { thinking } => {
-                    ContentDelta::TextDelta { text: thinking }
+                    ContentDelta::ThinkingDelta { thinking }
                 }
             };
             Ok(StreamEvent::ContentBlockDelta { index, delta })

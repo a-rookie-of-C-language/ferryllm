@@ -513,6 +513,11 @@ pub fn ir_to_anthropic_sse(event: StreamEvent) -> Option<(String, String)> {
                     map.insert("partial_json".into(), Value::String(partial_json));
                     map
                 }),
+                ContentDelta::ThinkingDelta { thinking } => ("thinking_delta", {
+                    let mut map = serde_json::Map::new();
+                    map.insert("thinking".into(), Value::String(thinking));
+                    map
+                }),
             };
             delta_json.insert("type".into(), Value::String(delta_type.to_string()));
             let json = serde_json::json!({

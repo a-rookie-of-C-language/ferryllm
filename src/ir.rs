@@ -218,6 +218,7 @@ pub enum StreamEvent {
 pub enum ContentDelta {
     TextDelta { text: String },
     InputJSONDelta { partial_json: String },
+    ThinkingDelta { thinking: String },
 }
 
 pub fn canonical_json(value: &Value) -> Value {

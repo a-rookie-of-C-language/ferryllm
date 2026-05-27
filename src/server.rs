@@ -1081,6 +1081,23 @@ async fn handle_anthropic_stream(
                         content_block: block,
                     }
                 }
+                ir::StreamEvent::ContentBlockStart {
+                    index,
+                    content_block: block @ ir::ContentBlock::Thinking { .. },
+                } => {
+                    // Register the thinking block index so subsequent
+                    // ThinkingDelta events don't inject a duplicate start.
+                    let output_index = *index_remap.entry(index).or_insert_with(|| {
+                        let next = next_output_index;
+                        next_output_index += 1;
+                        started_text_blocks.insert(index);
+                        next
+                    });
+                    ir::StreamEvent::ContentBlockStart {
+                        index: output_index,
+                        content_block: block,
+                    }
+                }
                 ir::StreamEvent::ContentBlockDelta {
                     index,
                     delta: ir::ContentDelta::InputJSONDelta { partial_json },
@@ -1092,6 +1109,28 @@ async fn handle_anthropic_stream(
                     ir::StreamEvent::ContentBlockDelta {
                         index: output_index,
                         delta: ir::ContentDelta::InputJSONDelta { partial_json },
+                    }
+                }
+                ir::StreamEvent::ContentBlockDelta {
+                    index,
+                    delta: ir::ContentDelta::ThinkingDelta { thinking },
+                } => {
+                    let output_index = *index_remap.entry(index).or_insert_with(|| {
+                        let next = next_output_index;
+                        next_output_index += 1;
+                        started_text_blocks.insert(index);
+                        pending.push(ir::StreamEvent::ContentBlockStart {
+                            index: next,
+                            content_block: ir::ContentBlock::Thinking {
+                                thinking: String::new(),
+                                cache_control: None,
+                            },
+                        });
+                        next
+                    });
+                    ir::StreamEvent::ContentBlockDelta {
+                        index: output_index,
+                        delta: ir::ContentDelta::ThinkingDelta { thinking },
                     }
                 }
                 ir::StreamEvent::ContentBlockStop { index } => {

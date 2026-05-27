@@ -511,7 +511,7 @@ pub fn ir_to_openai_sse(event: StreamEvent, message_id: &str, model: &str) -> Op
         StreamEvent::ContentBlockDelta { index, delta } => {
             let content = match delta {
                 ContentDelta::TextDelta { text } => Some(text),
-                ContentDelta::InputJSONDelta { .. } => None,
+                ContentDelta::InputJSONDelta { .. } | ContentDelta::ThinkingDelta { .. } => None,
             };
 
             let chunk = OpenAISseChunk {
