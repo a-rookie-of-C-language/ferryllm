@@ -13,6 +13,7 @@ ferryllm 是一个 Rust 编写的 LLM 协议网关。它把不同客户端协议
 
 - 提供 OpenAI-compatible 入口：`POST /v1/chat/completions`
 - 提供 Anthropic-compatible 入口：`POST /v1/messages`
+- 提供 OpenAI-respones 入口 `POST /v1/responses`
 - 支持模型别名、精确路由和前缀路由
 - 支持转发到 OpenAI-compatible 或 Anthropic 后端
 - 保留工具调用和 SSE 流式行为
@@ -162,6 +163,11 @@ api_key_env = "CODX_API_KEY"
 # 如果你想继续使用旧的 Chat Completions 路径，把这里改回：
 # type = "openai"
 
+# 或者使用 key_watch 从外部配置文件热加载 API key：
+# [[providers.key_watch]]
+# file = "C:/Users/hzz/.claude/settings.json"
+# path = "env.ANTHROPIC_AUTH_TOKEN"
+
 [[routes]]
 match = "cc-gpt55"
 match_type = "exact"
@@ -192,6 +198,8 @@ rewrite_model = "gpt-5.4"
 ```bash
 ferryllm check-config --config examples/config/codexapis.toml
 ```
+
+如需热加载 API key 配置（例如从 cc-switch 设置），请参阅配置文档中的 [key_watch](docs/configuration.md#key-watch-hot-reload-api-keys) 部分。
 
 如果要让 OpenAI-compatible 上游走 Responses API，而不是 Chat Completions，
 需要开启可选 feature，并把 provider type 改成 `openai_responses`：

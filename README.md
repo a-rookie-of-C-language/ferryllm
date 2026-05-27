@@ -162,6 +162,11 @@ api_key_env = "CODX_API_KEY"
 # If you want the legacy Chat Completions path instead, switch this back to:
 # type = "openai"
 
+# Or use key_watch for hot-reload from external config files:
+# [[providers.key_watch]]
+# file = "C:/Users/hzz/.claude/settings.json"
+# path = "env.ANTHROPIC_AUTH_TOKEN"
+
 [[routes]]
 match = "cc-gpt55"
 match_type = "exact"
@@ -192,6 +197,8 @@ Check a config without starting the server:
 ```bash
 ferryllm check-config --config examples/config/codexapis.toml
 ```
+
+For hot-reload API key configuration (e.g., from cc-switch settings), see the [key_watch](docs/configuration.md#key-watch-hot-reload-api-keys) section in the configuration docs.
 
 To route OpenAI-compatible upstream calls through the Responses API instead of
 Chat Completions, build with the optional feature and use provider type
