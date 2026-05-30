@@ -152,6 +152,50 @@ sending streaming request provider="openai" model=gpt-5.4
 
 If Claude Code says `Not logged in`, verify that cc-switch has written the provider environment into Claude Code settings and that `ANTHROPIC_BASE_URL` points to ferryllm.
 
+## Automatic API Key Reloading with key_watch
+
+When using cc-switch to manage API keys, you can configure ferryllm to automatically detect key changes. This eliminates the need to restart ferryllm when switching providers in cc-switch.
+
+### Setup
+
+Add `key_watch` configuration to your ferryllm config file:
+
+```toml
+[[providers]]
+name = "codexapis"
+type = "openai_responses"
+base_url = "https://codexapis.com"
+
+[[providers.key_watch]]
+file = "C:/Users/hzz/.claude/settings.json"
+path = "env.ANTHROPIC_AUTH_TOKEN"
+
+[[providers.key_watch]]
+file = "C:/Users/hzz/.codex/auth.json"
+path = "OPENAI_API_KEY"
+```
+
+When cc-switch switches providers and updates the settings file, ferryllm will automatically reload the API key without requiring a server restart.
+
+### Debugging
+
+Check the ferryllm logs for key loading information. With trace-level logging:
+
+```bash
+RUST_LOG=trace ferryllm serve --config your-config.toml
+```
+
+Look for these log entries:
+- `key file watcher started` — shows which files are being watched
+- `key_watch file change detected` — triggered when cc-switch switches providers
+- `api key loaded key_source=key_watch key_prefix=sk-ant-...` — shows loaded key format
+
+### Notes
+
+- ferryllm tries each `key_watch` entry in order and uses the first non-empty key found
+- The key prefix (first 8 characters) is logged for debugging authentication issues
+- Supported file formats: JSON and TOML
+
 ## Streaming
 
 ferryllm supports streaming for Claude Code.

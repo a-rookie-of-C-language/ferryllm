@@ -421,14 +421,10 @@ pub fn ir_to_anthropic_response(ir: ChatResponse) -> AnthropicMessageResponse {
                         name: name.clone(),
                         input: canonical_json(input),
                     }),
-                    ContentBlock::Thinking { thinking, .. } => {
-                        Some(AnthropicRespBlock::Thinking {
-                            thinking: thinking.clone(),
-                        })
-                    }
-                    ContentBlock::RedactedThinking => {
-                        Some(AnthropicRespBlock::RedactedThinking {})
-                    }
+                    ContentBlock::Thinking { thinking, .. } => Some(AnthropicRespBlock::Thinking {
+                        thinking: thinking.clone(),
+                    }),
+                    ContentBlock::RedactedThinking => Some(AnthropicRespBlock::RedactedThinking {}),
                     _ => None,
                 })
                 .collect()
@@ -466,7 +462,9 @@ pub fn ir_to_anthropic_response(ir: ChatResponse) -> AnthropicMessageResponse {
 /// Returns (event_type, data_json) or None if the event should be skipped.
 pub fn ir_to_anthropic_sse(event: StreamEvent) -> Option<(String, String)> {
     match event {
-        StreamEvent::MessageStart { message_id, model } => {
+        StreamEvent::MessageStart {
+            message_id, model, ..
+        } => {
             let json = serde_json::json!({
                 "type": "message_start",
                 "message": {
@@ -600,9 +598,7 @@ fn content_block_to_anthropic_sse(
             map.insert("thinking".into(), Value::String(thinking.clone()));
             ("thinking", map)
         }
-        ContentBlock::RedactedThinking => {
-            ("redacted_thinking", map)
-        }
+        ContentBlock::RedactedThinking => ("redacted_thinking", map),
         _ => {
             map.insert("text".into(), Value::String(String::new()));
             ("text", map)

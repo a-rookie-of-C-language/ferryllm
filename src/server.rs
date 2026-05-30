@@ -17,6 +17,8 @@ use axum::{
 use futures::StreamExt;
 
 use crate::adapter::AdapterError;
+#[cfg(feature = "openai-responses")]
+use crate::entry::openai_responses;
 use crate::entry::{anthropic, openai};
 use crate::ir::{self, ContentBlock, ReasoningControl};
 use crate::router::{ResolvedFallback, Router as ModelRouter};
@@ -33,6 +35,8 @@ pub struct AppState {
     rate_limiter: Option<RateLimiter>,
     key_limiters: Mutex<HashMap<u64, Arc<KeyLimiter>>>,
     provider_health: Mutex<HashMap<String, Arc<ProviderHealth>>>,
+    /// Cache of tool_use calls: call_id -> (tool_name, tool_input)
+    pub tool_call_cache: Arc<Mutex<HashMap<String, (String, serde_json::Value)>>>,
 }
 
 impl AppState {
@@ -54,6 +58,7 @@ impl AppState {
             rate_limiter,
             key_limiters: Mutex::new(HashMap::new()),
             provider_health: Mutex::new(HashMap::new()),
+            tool_call_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -359,7 +364,9 @@ impl Metrics {
             model: model.to_string(),
         };
         let mut map = self.labeled.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(key).or_insert_with(LabelMetrics::default).inc_request();
+        map.entry(key)
+            .or_insert_with(LabelMetrics::default)
+            .inc_request();
     }
 
     fn inc_labeled_error(&self, provider: &str, model: &str) {
@@ -368,7 +375,9 @@ impl Metrics {
             model: model.to_string(),
         };
         let mut map = self.labeled.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(key).or_insert_with(LabelMetrics::default).inc_error();
+        map.entry(key)
+            .or_insert_with(LabelMetrics::default)
+            .inc_error();
     }
 
     fn observe_labeled_latency(&self, provider: &str, model: &str, elapsed: Duration) {
@@ -449,15 +458,21 @@ impl Metrics {
 }
 
 pub fn build_router(state: Arc<AppState>) -> Router {
-    Router::new()
+    let r = Router::new()
         .route("/v1/chat/completions", post(openai_chat_handler))
         .route("/v1/messages", post(anthropic_messages_handler))
         .route("/v1/models", axum::routing::get(models_handler))
         .route("/health", axum::routing::get(health_handler))
         .route("/healthz", axum::routing::get(health_handler))
         .route("/readyz", axum::routing::get(ready_handler))
-        .route("/metrics", axum::routing::get(metrics_handler))
-        .with_state(state)
+        .route("/metrics", axum::routing::get(metrics_handler));
+
+    #[cfg(feature = "openai-responses")]
+    let r = r
+        .route("/v1/responses", post(responses_handler))
+        .route("/responses", post(responses_handler));
+
+    r.with_state(state)
 }
 
 fn apply_anthropic_prompt_cache_policy(req: &mut ir::ChatRequest, options: &PromptCacheOptions) {
@@ -708,7 +723,9 @@ async fn openai_chat_handler(
     apply_request_shape_debug_policy(&mut ir_req, &state.options.prompt_cache);
     let fallback_count = route.fallbacks.len();
     info!(request_id = %request_id, entry = "openai", display_model = %display_model, backend_model = %ir_req.model, provider = %route.provider, fallbacks = fallback_count, "resolved route");
-    state.metrics.inc_labeled_request(&route.provider, &display_model);
+    state
+        .metrics
+        .inc_labeled_request(&route.provider, &display_model);
 
     let response = if stream {
         handle_openai_stream(
@@ -731,7 +748,9 @@ async fn openai_chat_handler(
         .await
     };
     state.metrics.observe_latency(started_at.elapsed());
-    state.metrics.observe_labeled_latency(&route.provider, &display_model, started_at.elapsed());
+    state
+        .metrics
+        .observe_labeled_latency(&route.provider, &display_model, started_at.elapsed());
     match response {
         Ok(response) => {
             log_access(RequestLog {
@@ -748,7 +767,9 @@ async fn openai_chat_handler(
             Ok(response)
         }
         Err(err) => {
-            state.metrics.inc_labeled_error(&route.provider, &display_model);
+            state
+                .metrics
+                .inc_labeled_error(&route.provider, &display_model);
             log_access(RequestLog {
                 entry: "openai",
                 request_id: &request_id,
@@ -841,6 +862,263 @@ fn openai_sse_data(line: &str) -> String {
         .to_string()
 }
 
+// ── OpenAI Responses API endpoint ──────────────────────────────────────────
+
+#[cfg(feature = "openai-responses")]
+async fn responses_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<axum::response::Response, AppError> {
+    let started_at = Instant::now();
+    let _guards = preflight(&state, &headers, body.len())?;
+    state.metrics.inc_requests();
+    let request_id = request_id(&headers);
+    let body: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| AppError::bad_request(e.to_string()))?;
+    let resp_req: openai_responses::ResponsesRequest =
+        serde_json::from_value(body).map_err(|e| AppError::bad_request(e.to_string()))?;
+    let stream = resp_req.stream;
+    let mut ir_req =
+        openai_responses::responses_to_ir_with_cache(&resp_req, Some(&state.tool_call_cache));
+    strip_system_line_prefixes(&mut ir_req, &state.options.prompt_cache);
+    relocate_system_prefix_context(&mut ir_req, &state.options.prompt_cache);
+    let prompt_observation = estimate_prompt_observation(&ir_req);
+    info!(request_id = %request_id, entry = "responses", model = %ir_req.model, stream, "incoming request");
+    let route = state
+        .router
+        .resolve(&ir_req.model)
+        .map_err(AppError::from_adapter)?;
+
+    let display_model = ir_req.model.clone();
+    ir_req.model = route.model;
+    apply_default_reasoning_policy(&mut ir_req, &state.options);
+    apply_openai_prompt_cache_policy(&mut ir_req, &state.options.prompt_cache);
+    apply_request_shape_debug_policy(&mut ir_req, &state.options.prompt_cache);
+    let fallback_count = route.fallbacks.len();
+    info!(request_id = %request_id, entry = "responses", display_model = %display_model, backend_model = %ir_req.model, provider = %route.provider, fallbacks = fallback_count, "resolved route");
+    state
+        .metrics
+        .inc_labeled_request(&route.provider, &display_model);
+
+    let response = if stream {
+        handle_responses_stream(
+            &state,
+            route.adapter,
+            ir_req,
+            display_model.clone(),
+            prompt_observation,
+        )
+        .await
+    } else {
+        handle_responses_chat(
+            &state,
+            route.adapter,
+            route.fallbacks,
+            ir_req,
+            display_model.clone(),
+            prompt_observation,
+        )
+        .await
+    };
+    state.metrics.observe_latency(started_at.elapsed());
+    state
+        .metrics
+        .observe_labeled_latency(&route.provider, &display_model, started_at.elapsed());
+    match response {
+        Ok(response) => {
+            log_access(RequestLog {
+                entry: "responses",
+                request_id: &request_id,
+                model: &display_model,
+                provider: &route.provider,
+                stream,
+                status: StatusCode::OK,
+                latency: started_at.elapsed(),
+                fallback_count,
+                error_kind: None,
+            });
+            Ok(response)
+        }
+        Err(err) => {
+            state
+                .metrics
+                .inc_labeled_error(&route.provider, &display_model);
+            log_access(RequestLog {
+                entry: "responses",
+                request_id: &request_id,
+                model: &display_model,
+                provider: &route.provider,
+                stream,
+                status: err.status,
+                latency: started_at.elapsed(),
+                fallback_count,
+                error_kind: Some(err.kind),
+            });
+            Err(err)
+        }
+    }
+}
+
+#[cfg(feature = "openai-responses")]
+async fn handle_responses_chat(
+    state: &Arc<AppState>,
+    adapter: Arc<dyn crate::adapter::Adapter>,
+    fallbacks: Vec<ResolvedFallback>,
+    ir_req: ir::ChatRequest,
+    display_model: String,
+    prompt_observation: PromptObservation,
+) -> Result<axum::response::Response, AppError> {
+    let mut ir_resp = chat_with_fallbacks(state, adapter, fallbacks, &ir_req).await?;
+    state
+        .metrics
+        .observe_prompt(prompt_observation.with_usage(&ir_resp.usage));
+    log_prompt_observation(
+        "responses",
+        &display_model,
+        &ir_resp.usage,
+        prompt_observation,
+    );
+    ir_resp.model = display_model;
+    let responses_resp = openai_responses::ir_to_responses_response(ir_resp);
+    let body = serde_json::to_string(&responses_resp).unwrap_or_default();
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response())
+}
+
+#[cfg(feature = "openai-responses")]
+async fn handle_responses_stream(
+    state: &Arc<AppState>,
+    adapter: Arc<dyn crate::adapter::Adapter>,
+    ir_req: ir::ChatRequest,
+    display_model: String,
+    prompt_observation: PromptObservation,
+) -> Result<axum::response::Response, AppError> {
+    use std::collections::{HashMap, HashSet};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let backend_stream = with_timeout(state, adapter.chat_stream(&ir_req)).await?;
+
+    let response_id = format!("resp-{}", uuid_v4());
+    let message_id = format!("msg_{}", uuid_v4());
+    let metrics = Arc::clone(state);
+    let tool_cache = Arc::clone(&state.tool_call_cache);
+
+    let mut stream_state = openai_responses::ResponsesStreamState {
+        response_id,
+        message_id,
+        model: display_model.clone(),
+        opened_items: HashSet::new(),
+        accumulated_text: HashMap::new(),
+        pending_tool_calls: HashMap::new(),
+        thinking_blocks: HashMap::new(),
+        pending_usage: None,
+        completed_sent: Arc::new(AtomicBool::new(false)),
+    };
+
+    let closing_flag = Arc::clone(&stream_state.completed_sent);
+
+    let sse_stream = backend_stream
+        .map(move |result| {
+            let state = Arc::clone(&metrics);
+            match result {
+                Ok(stream_event) => {
+                    if let ir::StreamEvent::MessageDelta {
+                        usage: Some(usage), ..
+                    } = &stream_event
+                    {
+                        state
+                            .metrics
+                            .observe_prompt(prompt_observation.with_usage(usage));
+                        log_prompt_observation(
+                            "responses",
+                            &display_model,
+                            usage,
+                            prompt_observation,
+                        );
+                    }
+                    let events =
+                        openai_responses::ir_to_responses_sse(stream_event, &mut stream_state);
+                    // Cache completed tool calls for FunctionCallOutput reconstruction
+                    // Check if any tool calls were just completed (removed from pending_tool_calls)
+                    for (event_type, data) in &events {
+                        if event_type == "response.output_item.done" {
+                            if let Ok(item) = serde_json::from_str::<serde_json::Value>(data) {
+                                if item["item"]["type"].as_str() == Some("function_call") {
+                                    if let (Some(id), Some(name), Some(args)) = (
+                                        item["item"]["id"].as_str(),
+                                        item["item"]["name"].as_str(),
+                                        item["item"]["arguments"].as_str(),
+                                    ) {
+                                        if let Ok(input) =
+                                            serde_json::from_str::<serde_json::Value>(args)
+                                        {
+                                            if let Ok(mut cache) = tool_cache.lock() {
+                                                cache.insert(
+                                                    id.to_string(),
+                                                    (name.to_string(), input),
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    events
+                        .into_iter()
+                        .map(|(event_type, data)| {
+                            Ok::<_, Infallible>(Event::default().event(event_type).data(data))
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Err(e) => {
+                    vec![Ok::<_, Infallible>(
+                        Event::default().event("error").data(
+                            serde_json::json!({
+                                "type": "error",
+                                "error": {"type": "stream_error", "message": e.to_string()}
+                            })
+                            .to_string(),
+                        ),
+                    )]
+                }
+            }
+        })
+        .flat_map(|events: Vec<Result<Event, Infallible>>| futures::stream::iter(events));
+
+    let tail = futures::stream::once(async move {
+        if !closing_flag.load(Ordering::Relaxed) {
+            Some(Ok::<_, Infallible>(
+                Event::default().event("response.completed").data(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": format!("resp-{}", uuid_v4()),
+                            "object": "response",
+                            "status": "completed",
+                            "output": [],
+                            "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                        }
+                    })
+                    .to_string(),
+                ),
+            ))
+        } else {
+            None
+        }
+    })
+    .filter_map(futures::future::ready);
+
+    Ok(Sse::new(sse_stream.chain(tail))
+        .keep_alive(axum::response::sse::KeepAlive::default())
+        .into_response())
+}
+
 // ── Anthropic-compatible endpoint ───────────────────────────────────────────
 
 async fn anthropic_messages_handler(
@@ -876,7 +1154,9 @@ async fn anthropic_messages_handler(
     apply_request_shape_debug_policy(&mut ir_req, &state.options.prompt_cache);
     let fallback_count = route.fallbacks.len();
     info!(request_id = %request_id, entry = "anthropic", display_model = %display_model, backend_model = %ir_req.model, provider = %route.provider, fallbacks = fallback_count, "resolved route");
-    state.metrics.inc_labeled_request(&route.provider, &display_model);
+    state
+        .metrics
+        .inc_labeled_request(&route.provider, &display_model);
 
     let response = if stream {
         handle_anthropic_stream(
@@ -899,7 +1179,9 @@ async fn anthropic_messages_handler(
         .await
     };
     state.metrics.observe_latency(started_at.elapsed());
-    state.metrics.observe_labeled_latency(&route.provider, &display_model, started_at.elapsed());
+    state
+        .metrics
+        .observe_labeled_latency(&route.provider, &display_model, started_at.elapsed());
     match response {
         Ok(response) => {
             log_access(RequestLog {
@@ -916,7 +1198,9 @@ async fn anthropic_messages_handler(
             Ok(response)
         }
         Err(err) => {
-            state.metrics.inc_labeled_error(&route.provider, &display_model);
+            state
+                .metrics
+                .inc_labeled_error(&route.provider, &display_model);
             log_access(RequestLog {
                 entry: "anthropic",
                 request_id: &request_id,
@@ -982,7 +1266,13 @@ async fn handle_anthropic_stream(
 
     let prepend = futures::stream::once({
         let model = display_model.clone();
-        async move { Control::Injected(ir::StreamEvent::MessageStart { message_id, model }) }
+        async move {
+            Control::Injected(ir::StreamEvent::MessageStart {
+                message_id,
+                model,
+                input_tokens: None,
+            })
+        }
     });
 
     let adapter_stream = backend_stream.map(Control::Adapter);

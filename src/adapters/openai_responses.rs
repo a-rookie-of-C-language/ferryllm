@@ -9,7 +9,7 @@ use serde_json::Value;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, error, info, trace};
 
-use crate::adapter::{Adapter, AdapterError};
+use crate::adapter::{Adapter, AdapterError, ApiKey};
 use crate::ir::*;
 use crate::token_observability::{
     push_summary_field, request_shape_debug_enabled, stable_hash_hex, summarize_flag,
@@ -136,18 +136,20 @@ struct ResponsesSseEvent {
     delta: Option<String>,
 }
 
+// --- Response parsing helpers ---
+
 pub struct OpenaiResponsesAdapter {
     client: Client,
-    base_url: String,
-    api_key: String,
+    base_url: ApiKey,
+    api_key: ApiKey,
 }
 
 impl OpenaiResponsesAdapter {
     pub fn new(base_url: String, api_key: String) -> Self {
         Self {
             client: Client::new(),
-            base_url,
-            api_key,
+            base_url: ApiKey::new(base_url),
+            api_key: ApiKey::new(api_key),
         }
     }
 }
@@ -434,9 +436,17 @@ impl Adapter for OpenaiResponsesAdapter {
         !model.starts_with("claude-")
     }
 
+    fn update_api_key(&self, new_key: String) {
+        self.api_key.update(new_key);
+    }
+
+    fn update_base_url(&self, new_url: String) {
+        self.base_url.update(new_url);
+    }
+
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, AdapterError> {
         let native = ir_to_responses_request(request);
-        let url = format!("{}/v1/responses", self.base_url);
+        let url = format!("{}/v1/responses", self.base_url.read());
         info!(provider = "openai_responses", model = %request.model, stream = request.stream, "sending responses request");
         trace!(provider = "openai_responses", url = %url, body_model = %native.model, "responses request prepared");
         if request_shape_debug_enabled(request) {
@@ -450,7 +460,7 @@ impl Adapter for OpenaiResponsesAdapter {
         let resp = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", self.api_key.read()))
             .json(&native)
             .send()
             .await
@@ -480,7 +490,7 @@ impl Adapter for OpenaiResponsesAdapter {
     {
         let mut native = ir_to_responses_request(request);
         native.stream = true;
-        let url = format!("{}/v1/responses", self.base_url);
+        let url = format!("{}/v1/responses", self.base_url.read());
         info!(provider = "openai_responses", model = %request.model, stream = true, "sending streaming responses request");
         if request_shape_debug_enabled(request) {
             debug!(
@@ -493,7 +503,7 @@ impl Adapter for OpenaiResponsesAdapter {
         let resp = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", format!("Bearer {}", self.api_key.read()))
             .json(&native)
             .send()
             .await
@@ -515,7 +525,11 @@ impl Adapter for OpenaiResponsesAdapter {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
         tokio::spawn(async move {
-            let _ = tx.send(Ok(StreamEvent::MessageStart { message_id, model }));
+            let _ = tx.send(Ok(StreamEvent::MessageStart {
+                message_id,
+                model,
+                input_tokens: None,
+            }));
             let mut buffer = String::new();
             let mut text_started = false;
             let mut tool_index = 1u32;
@@ -541,6 +555,7 @@ impl Adapter for OpenaiResponsesAdapter {
                             continue;
                         }
                         let Ok(event) = serde_json::from_str::<ResponsesSseEvent>(data) else {
+                            trace!(provider = "openai_responses", raw_event = %data, "failed to parse SSE event as ResponsesSseEvent");
                             continue;
                         };
                         handle_responses_sse_event(
@@ -554,12 +569,25 @@ impl Adapter for OpenaiResponsesAdapter {
                 }
             }
             if text_started {
+                debug!(
+                    provider = "openai_responses",
+                    "stream ending: emitting ContentBlockStop for text block"
+                );
                 let _ = tx.send(Ok(StreamEvent::ContentBlockStop { index: 0 }));
+            } else {
+                debug!(
+                    provider = "openai_responses",
+                    "stream ending: text was never started"
+                );
             }
             let _ = tx.send(Ok(StreamEvent::MessageDelta {
                 stop_reason: Some("end_turn".into()),
                 usage: seen_usage,
             }));
+            debug!(
+                provider = "openai_responses",
+                "stream ending: emitting MessageStop"
+            );
             let _ = tx.send(Ok(StreamEvent::MessageStop));
         });
 
@@ -582,9 +610,14 @@ fn handle_responses_sse_event(
     tool_index: &mut u32,
     seen_usage: &mut Option<Usage>,
 ) {
+    trace!(provider = "openai_responses", event_type = %event.ty, "received upstream SSE event");
     match event.ty.as_str() {
         "response.output_text.delta" => {
             if !*text_started {
+                debug!(
+                    provider = "openai_responses",
+                    "first text delta: emitting ContentBlockStart"
+                );
                 let _ = tx.send(Ok(StreamEvent::ContentBlockStart {
                     index: 0,
                     content_block: ContentBlock::Text {
@@ -595,11 +628,19 @@ fn handle_responses_sse_event(
                 *text_started = true;
             }
             if let Some(delta) = event.delta {
+                trace!(provider = "openai_responses", text_fragment = %delta, "sending text delta");
                 let _ = tx.send(Ok(StreamEvent::ContentBlockDelta {
                     index: 0,
                     delta: ContentDelta::TextDelta { text: delta },
                 }));
             }
+        }
+        "response.output_text.done" => {
+            debug!(
+                provider = "openai_responses",
+                "output_text.done: emitting ContentBlockStop for text block"
+            );
+            let _ = tx.send(Ok(StreamEvent::ContentBlockStop { index: 0 }));
         }
         "response.output_item.done" => {
             if let Some(item) = event.item {

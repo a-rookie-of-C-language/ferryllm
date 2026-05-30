@@ -166,6 +166,68 @@ request_timeout_secs = 120
 max_idle_connections = 256
 ```
 
+## Key Watch (Hot-Reload API Keys)
+
+The `key_watch` feature allows ferryllm to automatically reload API keys when configuration files change. This is particularly useful when using tools like cc-switch that manage API keys in external files.
+
+```toml
+[[providers]]
+name = "my-provider"
+type = "anthropic"
+base_url = "https://api.anthropic.com"
+
+[[providers.key_watch]]
+file = "C:/Users/hzz/.claude/settings.json"
+path = "env.ANTHROPIC_AUTH_TOKEN"
+```
+
+**Fields:**
+
+- `file`: Path to the configuration file (supports JSON and TOML formats)
+- `path`: Dotted JSON path to the key value (e.g., `env.ANTHROPIC_AUTH_TOKEN` for Anthropic keys, or `OPENAI_API_KEY` for OpenAI keys)
+
+The provider attempts each key_watch entry in order and uses the first non-empty key found. When the watched file changes, ferryllm automatically reloads the key without requiring a server restart.
+
+**File formats:**
+
+JSON file (`~/.claude/settings.json`):
+```json
+{
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-..."
+  }
+}
+```
+
+TOML file (`~/.codex/auth.toml`):
+```toml
+OPENAI_API_KEY = "sk-..."
+ANTHROPIC_AUTH_TOKEN = "sk-ant-..."
+```
+
+You can also watch multiple files for the same provider. This is useful when switching between different configuration sources:
+
+```toml
+[[providers]]
+name = "my-provider"
+type = "anthropic"
+base_url = "https://api.anthropic.com"
+
+[[providers.key_watch]]
+file = "C:/Users/hzz/.claude/settings.json"
+path = "env.ANTHROPIC_AUTH_TOKEN"
+
+[[providers.key_watch]]
+file = "C:/Users/hzz/.codex/auth.json"
+path = "ANTHROPIC_AUTH_TOKEN"
+```
+
+**Notes:**
+
+- A provider can only use one key source: `api_key_env`, `api_key_url`, `api_key_file`, or `key_watch`
+- When `key_watch` is used, the server logs the key prefix (first 8 characters) for debugging
+- File change events are logged at trace/debug level
+
 ## Routes
 
 ```toml
