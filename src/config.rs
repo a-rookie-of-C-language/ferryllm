@@ -526,7 +526,7 @@ fn resolve_key_from_watch(
                 tracing::trace!(file = %watch.file, path = %watch.path, key_prefix = %&key[..key.len().min(8)], "resolved api key from watched file");
                 return Ok(key);
             }
-            Ok(key) => {
+            Ok(_) => {
                 tracing::debug!(file = %watch.file, path = %watch.path, "key_watch file exists but key is empty");
             }
             Err(e) => {

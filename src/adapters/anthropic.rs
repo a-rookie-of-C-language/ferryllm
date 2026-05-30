@@ -246,7 +246,10 @@ enum AnthropicDelta {
     #[serde(rename = "thinking_delta")]
     ThinkingDelta { thinking: String },
     #[serde(rename = "signature_delta")]
-    SignatureDelta { signature: String },
+    SignatureDelta {
+        #[serde(rename = "signature")]
+        _signature: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,8 +370,6 @@ fn ir_to_anthropic_request(req: &ChatRequest) -> AnthropicRequest {
         .filter(|m| m.role != Role::System)
         .map(ir_message_to_anthropic)
         .collect();
-
-    for (i, t) in req.tools.iter().enumerate() {}
 
     let mut seen_tool_names = std::collections::HashSet::new();
     let tools: Vec<AnthropicTool> = req
@@ -821,8 +822,6 @@ impl Adapter for AnthropicAdapter {
 
         let url = format!("{}/v1/messages", self.base_url.read());
         info!(provider = "anthropic", model = %request.model, stream = true, "sending streaming request");
-        // Debug: dump the full request body
-        if let Ok(body) = serde_json::to_string(&native) {}
         if request_shape_debug_enabled(request) {
             debug!(
                 provider = "anthropic",

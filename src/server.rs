@@ -177,6 +177,7 @@ impl LabelMetrics {
         self.latency_micros.fetch_add(micros, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     fn add_tokens(&self, tokens: u64) {
         self.tokens.fetch_add(tokens, Ordering::Relaxed);
     }
@@ -364,9 +365,7 @@ impl Metrics {
             model: model.to_string(),
         };
         let mut map = self.labeled.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(key)
-            .or_insert_with(LabelMetrics::default)
-            .inc_request();
+        map.entry(key).or_default().inc_request();
     }
 
     fn inc_labeled_error(&self, provider: &str, model: &str) {
@@ -375,9 +374,7 @@ impl Metrics {
             model: model.to_string(),
         };
         let mut map = self.labeled.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(key)
-            .or_insert_with(LabelMetrics::default)
-            .inc_error();
+        map.entry(key).or_default().inc_error();
     }
 
     fn observe_labeled_latency(&self, provider: &str, model: &str, elapsed: Duration) {
@@ -387,20 +384,17 @@ impl Metrics {
         };
         let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
         let mut map = self.labeled.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(key)
-            .or_insert_with(LabelMetrics::default)
-            .add_latency(micros);
+        map.entry(key).or_default().add_latency(micros);
     }
 
+    #[allow(dead_code)]
     fn observe_labeled_tokens(&self, provider: &str, model: &str, tokens: u64) {
         let key = LabelKey {
             provider: provider.to_string(),
             model: model.to_string(),
         };
         let mut map = self.labeled.lock().unwrap_or_else(|e| e.into_inner());
-        map.entry(key)
-            .or_insert_with(LabelMetrics::default)
-            .add_tokens(tokens);
+        map.entry(key).or_default().add_tokens(tokens);
     }
 
     fn render(&self) -> String {

@@ -7,6 +7,8 @@ use serde_json::Value;
 
 use crate::ir::*;
 
+type ToolCallCache = std::sync::Arc<std::sync::Mutex<HashMap<String, (String, Value)>>>;
+
 #[derive(Debug, Deserialize)]
 pub struct ResponsesRequest {
     pub model: String,
@@ -175,7 +177,7 @@ pub fn responses_to_ir(req: &ResponsesRequest) -> ChatRequest {
 
 pub fn responses_to_ir_with_cache(
     req: &ResponsesRequest,
-    tool_call_cache: Option<&std::sync::Arc<std::sync::Mutex<HashMap<String, (String, Value)>>>>,
+    tool_call_cache: Option<&ToolCallCache>,
 ) -> ChatRequest {
     let system = req.instructions.clone();
 
@@ -192,18 +194,18 @@ pub fn responses_to_ir_with_cache(
     let tools = req
         .tools
         .iter()
-        .filter_map(|t| match t {
+        .map(|t| match t {
             ResponsesTool::Function {
                 name,
                 description,
                 parameters,
                 ..
-            } => Some(Tool {
+            } => Tool {
                 name: name.clone(),
                 description: description.clone().unwrap_or_default(),
                 parameters: parameters.clone(),
                 cache_control: None,
-            }),
+            },
             ResponsesTool::Generic(raw) => {
                 let name = raw
                     .get("name")
@@ -229,12 +231,12 @@ pub fn responses_to_ir_with_cache(
                             serde_json::json!({"type": "object", "properties": {}})
                         }
                     });
-                Some(Tool {
+                Tool {
                     name,
                     description,
                     parameters,
                     cache_control: None,
-                })
+                }
             }
         })
         .collect();
@@ -272,13 +274,14 @@ pub fn responses_to_ir_with_cache(
     }
 }
 
+#[cfg(test)]
 fn responses_input_item_to_ir(item: &ResponsesInputItem) -> Vec<Message> {
     responses_input_item_to_ir_with_cache(item, None)
 }
 
 fn responses_input_item_to_ir_with_cache(
     item: &ResponsesInputItem,
-    tool_call_cache: Option<&std::sync::Arc<std::sync::Mutex<HashMap<String, (String, Value)>>>>,
+    tool_call_cache: Option<&ToolCallCache>,
 ) -> Vec<Message> {
     match item {
         ResponsesInputItem::Message { role, content } => {
@@ -650,7 +653,7 @@ pub fn ir_to_responses_sse(
             // The actual arguments come via InputJSONDelta events
             // Start with the initial input (may be empty for streaming)
             let initial_args =
-                if input.is_object() && !input.as_object().map_or(true, |m| m.is_empty()) {
+                if input.is_object() && !input.as_object().is_none_or(|m| m.is_empty()) {
                     canonical_json_string(&input)
                 } else {
                     String::new()
@@ -774,9 +777,6 @@ pub fn ir_to_responses_sse(
                 }),
             )]
         }
-
-        StreamEvent::ContentBlockDelta { .. } => vec![],
-
         StreamEvent::ContentBlockStop { index } => {
             let mut events = Vec::new();
 
