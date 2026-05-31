@@ -172,13 +172,41 @@ fn launch_vscode(request: LaunchRequest) -> Result<(), String> {
     let base_url = format_base_url(&request.listen, &request.provider_type);
     let (key_name, base_name) = env_var_names(&request.provider_type);
 
-    Command::new("code")
-        .arg(&request.directory)
-        .env(key_name, "ferryllm")
-        .env(base_name, &base_url)
-        .spawn()
-        .map_err(|e| format!("failed to launch VS Code: {}", e))?;
-    Ok(())
+    // Try common VS Code locations on Windows
+    #[cfg(windows)]
+    {
+        let candidates = [
+            "code",
+            "code.cmd",
+            &format!(
+                "{}\\AppData\\Local\\Programs\\Microsoft VS Code\\bin\\code.cmd",
+                std::env::var("USERPROFILE").unwrap_or_default()
+            ),
+        ];
+        for cmd in &candidates {
+            if Command::new(cmd)
+                .arg(&request.directory)
+                .env(key_name, "ferryllm")
+                .env(base_name, &base_url)
+                .spawn()
+                .is_ok()
+            {
+                return Ok(());
+            }
+        }
+        Err("cannot find VS Code. Please ensure 'code' is in your PATH or VS Code is installed".into())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Command::new("code")
+            .arg(&request.directory)
+            .env(key_name, "ferryllm")
+            .env(base_name, &base_url)
+            .spawn()
+            .map_err(|e| format!("failed to launch VS Code: {}", e))?;
+        Ok(())
+    }
 }
 
 fn format_base_url(listen: &str, provider_type: &str) -> String {

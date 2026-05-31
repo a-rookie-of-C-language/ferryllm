@@ -79,6 +79,7 @@ type RecentLaunch = {
   id: string;
   directory: string;
   tool: AITool;
+  launchType: "cli" | "vscode";
   providerName: string;
   providerType: string;
   configPath: string;
@@ -335,19 +336,20 @@ function App() {
     setStatus(await invoke<ProcessStatus>("server_status"));
   }
 
-  function recordLaunch(directory: string, tool: AITool) {
+  function recordLaunch(directory: string, tool: AITool, launchType: "cli" | "vscode") {
     if (!selectedProviderConfig) return;
     const entry: RecentLaunch = {
       id: Date.now().toString(36),
       directory,
       tool,
+      launchType,
       providerName: selectedProviderConfig.name,
       providerType: selectedProviderConfig.type,
       configPath: "localStorage",
       lastUsed: Date.now(),
     };
     setRecentLaunches((prev) => {
-      const deduped = prev.filter((r) => !(r.directory === directory && r.tool === tool));
+      const deduped = prev.filter((r) => !(r.directory === directory && r.tool === tool && r.launchType === launchType));
       const next = [entry, ...deduped].slice(0, 50);
       localStorage.setItem("ferryllm-launches", JSON.stringify(next));
       return next;
@@ -368,7 +370,7 @@ function App() {
     const listen = valueAsString(config.server?.listen) || "127.0.0.1:3000";
     try {
       await invoke("launch_cli", { request: { directory: dir, listen, provider_type: selectedProviderConfig.type, tool: launchTool } });
-      recordLaunch(dir, launchTool);
+      recordLaunch(dir, launchTool, "cli");
       addToast(`${launchTool} CLI launched`, "success");
     } catch (e) { addToast(String(e), "error"); }
   }
@@ -379,7 +381,7 @@ function App() {
     const listen = valueAsString(config.server?.listen) || "127.0.0.1:3000";
     try {
       await invoke("launch_vscode", { request: { directory: dir, listen, provider_type: selectedProviderConfig.type, tool: launchTool } });
-      recordLaunch(dir, launchTool);
+      recordLaunch(dir, launchTool, "vscode");
       addToast("VS Code launched", "success");
     } catch (e) { addToast(String(e), "error"); }
   }
@@ -387,13 +389,17 @@ function App() {
   async function quickLaunch(item: RecentLaunch) {
     const listen = valueAsString(config.server?.listen) || "127.0.0.1:3000";
     try {
-      await invoke("launch_cli", { request: { directory: item.directory, listen, provider_type: item.providerType, tool: item.tool } });
+      if (item.launchType === "vscode") {
+        await invoke("launch_vscode", { request: { directory: item.directory, listen, provider_type: item.providerType, tool: item.tool } });
+      } else {
+        await invoke("launch_cli", { request: { directory: item.directory, listen, provider_type: item.providerType, tool: item.tool } });
+      }
       setRecentLaunches((prev) => {
         const next = prev.map((r) => r.id === item.id ? { ...r, lastUsed: Date.now() } : r).sort((a, b) => b.lastUsed - a.lastUsed);
         localStorage.setItem("ferryllm-launches", JSON.stringify(next));
         return next;
       });
-      addToast(`${item.tool} launched`, "success");
+      addToast(`${item.launchType === "vscode" ? "VS Code" : item.tool + " CLI"} launched`, "success");
     } catch (e) { addToast(String(e), "error"); }
   }
 
@@ -931,6 +937,12 @@ function App() {
                             item.tool === "codex" ? "bg-info-soft text-primary" : "bg-success-soft text-success"
                           )}>
                             {item.tool}
+                          </span>
+                          <span className={cn(
+                            "rounded-full px-2 py-0.5 text-[11px] font-semibold",
+                            item.launchType === "vscode" ? "bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400" : "bg-orange-100 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400"
+                          )}>
+                            {item.launchType === "vscode" ? "VS Code" : "CLI"}
                           </span>
                           <span className="rounded-full bg-muted-soft px-2 py-0.5 text-[11px] font-semibold text-muted">
                             {item.providerName}
