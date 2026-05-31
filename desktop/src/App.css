@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --color-bg: var(--c-bg);
+  --color-fg: var(--c-fg);
+  --color-surface: var(--c-surface);
+  --color-surface-hover: var(--c-surface-hover);
+  --color-muted: var(--c-muted);
+  --color-muted-soft: var(--c-muted-soft);
+  --color-border: var(--c-border);
+  --color-border-strong: var(--c-border-strong);
+  --color-primary: var(--c-primary);
+  --color-primary-hover: var(--c-primary-hover);
+  --color-accent: var(--c-accent);
+  --color-accent-hover: var(--c-accent-hover);
+  --color-success: var(--c-success);
+  --color-success-soft: var(--c-success-soft);
+  --color-danger: var(--c-danger);
+  --color-danger-soft: var(--c-danger-soft);
+  --color-info-soft: var(--c-info-soft);
+  --color-heading: var(--c-heading);
+  --color-label: var(--c-label);
+  --color-icon: var(--c-icon);
+  --color-icon-hover: var(--c-icon-hover);
+  --color-input-bg: var(--c-input-bg);
+
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+:root {
+  color-scheme: light;
+  --c-bg: #f8f9fb;
+  --c-fg: #111113;
+  --c-surface: #ffffff;
+  --c-surface-hover: #f3f4f6;
+  --c-muted: #71717a;
+  --c-muted-soft: #f4f4f5;
+  --c-border: #e4e4e7;
+  --c-border-strong: #d4d4d8;
+  --c-primary: #2563eb;
+  --c-primary-hover: #1d4ed8;
+  --c-accent: #f97316;
+  --c-accent-hover: #ea580c;
+  --c-success: #10b981;
+  --c-success-soft: #ecfdf5;
+  --c-danger: #ef4444;
+  --c-danger-soft: #fef2f2;
+  --c-info-soft: #eff6ff;
+  --c-heading: #09090b;
+  --c-label: #18181b;
+  --c-icon: #71717a;
+  --c-icon-hover: #111113;
+  --c-input-bg: #ffffff;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --c-bg: #0a0a0c;
+  --c-fg: #ececf1;
+  --c-surface: #161618;
+  --c-surface-hover: #1f1f23;
+  --c-muted: #8b8b96;
+  --c-muted-soft: #1a1a1e;
+  --c-border: #2a2a30;
+  --c-border-strong: #3a3a42;
+  --c-primary: #3b82f6;
+  --c-primary-hover: #60a5fa;
+  --c-accent: #fb923c;
+  --c-accent-hover: #fdba74;
+  --c-success: #34d399;
+  --c-success-soft: #052e16;
+  --c-danger: #f87171;
+  --c-danger-soft: #450a0a;
+  --c-info-soft: #172554;
+  --c-heading: #f4f4f5;
+  --c-label: #d4d4d8;
+  --c-icon: #8b8b96;
+  --c-icon-hover: #d4d4d8;
+  --c-input-bg: #1a1a1e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  overflow-x: hidden;
+  background: var(--c-bg);
+  color: var(--c-fg);
+  font-family: var(--font-sans);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  transition: background-color 200ms ease, color 200ms ease;
+}
+
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: 0.5; }
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--c-primary);
+  outline-offset: 2px;
+}
+
+input, select {
+  width: 100%;
+  height: 40px;
+  border: 1px solid var(--c-border);
+  border-radius: 8px;
+  background: var(--c-input-bg);
+  color: var(--c-fg);
+  padding: 0 12px;
+  font-size: 14px;
+  transition: border-color 150ms ease;
+}
+
+input:focus, select:focus {
+  border-color: var(--c-primary);
+}
+
+label {
+  display: grid;
+  gap: 6px;
+}
+
+label > span {
+  color: var(--c-label);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}

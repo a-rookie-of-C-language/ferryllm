@@ -164,6 +164,9 @@ pub struct ProviderConfig {
     #[serde(rename = "type")]
     pub provider_type: ProviderType,
     pub base_url: String,
+    /// Direct API key value defined in the config file.
+    #[serde(default)]
+    pub api_key: Option<String>,
     #[serde(default)]
     pub api_key_env: Option<String>,
     #[serde(default)]
@@ -252,6 +255,7 @@ impl Config {
                 )));
             }
             let key_sources = [
+                provider.api_key.is_some(),
                 provider.api_key_env.is_some(),
                 provider.api_key_url.is_some(),
                 provider.api_key_file.is_some(),
@@ -262,7 +266,7 @@ impl Config {
             .count();
             if key_sources > 1 {
                 return Err(ConfigError::Invalid(format!(
-                    "provider '{}' must specify only one of: api_key_env, api_key_url, api_key_file, key_watch",
+                    "provider '{}' must specify only one of: api_key, api_key_env, api_key_url, api_key_file, key_watch",
                     provider.name
                 )));
             }
@@ -402,7 +406,9 @@ impl Config {
 
         let mut router = Router::new();
         for provider in &self.providers {
-            let api_key = if let Some(env) = &provider.api_key_env {
+            let api_key = if let Some(key) = &provider.api_key {
+                key.clone()
+            } else if let Some(env) = &provider.api_key_env {
                 std::env::var(env).map_err(|_| {
                     ConfigError::Invalid(format!(
                         "environment variable '{}' is required for provider '{}'",
@@ -429,7 +435,9 @@ impl Config {
             };
 
             let key_prefix = &api_key[..api_key.len().min(8)];
-            let key_source = if provider.api_key_env.is_some() {
+            let key_source = if provider.api_key.is_some() {
+                "direct"
+            } else if provider.api_key_env.is_some() {
                 "env"
             } else if provider.api_key_url.is_some() {
                 "url"
