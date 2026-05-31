@@ -564,6 +564,10 @@ impl Adapter for GeminiAdapter {
         self.base_url.update(new_url);
     }
 
+    fn protocol(&self) -> crate::adapter::Protocol {
+        crate::adapter::Protocol::Gemini
+    }
+
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, AdapterError> {
         let native = ir_to_gemini_request(request);
         let url = gemini_request_url(&self.base_url.read(), &request.model, false);

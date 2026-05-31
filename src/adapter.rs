@@ -6,6 +6,39 @@ use futures::Stream;
 
 use crate::ir::{ChatRequest, ChatResponse, StreamEvent};
 
+/// Wire protocol used by a client endpoint or backend adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    OpenAI,
+    Anthropic,
+    OpenAIResponses,
+    Gemini,
+}
+
+/// Raw HTTP response returned by passthrough methods.
+pub struct RawResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl RawResponse {
+    /// Convert into an [`axum::response::Response`].
+    pub fn into_axum(self) -> axum::response::Response {
+        let status = axum::http::StatusCode::from_u16(self.status)
+            .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+        let mut builder = axum::response::Response::builder().status(status);
+        for (k, v) in &self.headers {
+            if k.to_lowercase() != "transfer-encoding" {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+        }
+        builder
+            .body(axum::body::Body::from(self.body))
+            .unwrap_or_else(|_| axum::response::Response::new(axum::body::Body::empty()))
+    }
+}
+
 /// Thread-safe, hot-reloadable string field wrapper.
 #[derive(Clone)]
 pub struct WatchedField(Arc<RwLock<String>>);
@@ -69,6 +102,29 @@ pub trait Adapter: Send + Sync {
         request: &ChatRequest,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, AdapterError>> + Send>>, AdapterError>;
 
+    /// Wire protocol this adapter speaks (e.g. `Protocol::Anthropic`).
+    fn protocol(&self) -> Protocol;
+
+    /// Forward a non-streaming request as raw bytes (passthrough mode).
+    ///
+    /// Default implementation returns `UnsupportedFeature`.
+    async fn chat_raw(&self, _body: &[u8]) -> Result<RawResponse, AdapterError> {
+        Err(AdapterError::UnsupportedFeature {
+            provider: self.provider_name().to_string(),
+            feature: "raw passthrough".into(),
+        })
+    }
+
+    /// Forward a streaming request as raw bytes (passthrough mode).
+    ///
+    /// Default implementation returns `UnsupportedFeature`.
+    async fn chat_stream_raw(&self, _body: &[u8]) -> Result<RawResponse, AdapterError> {
+        Err(AdapterError::UnsupportedFeature {
+            provider: self.provider_name().to_string(),
+            feature: "raw stream passthrough".into(),
+        })
+    }
+
     /// Update the API key at runtime (for hot-reload from file watcher).
     fn update_api_key(&self, _new_key: String) {}
 
@@ -87,6 +143,10 @@ impl<T: Adapter + ?Sized> Adapter for Box<T> {
         (**self).supports_model(model)
     }
 
+    fn protocol(&self) -> Protocol {
+        (**self).protocol()
+    }
+
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, AdapterError> {
         (**self).chat(request).await
     }
@@ -97,5 +157,13 @@ impl<T: Adapter + ?Sized> Adapter for Box<T> {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamEvent, AdapterError>> + Send>>, AdapterError>
     {
         (**self).chat_stream(request).await
+    }
+
+    async fn chat_raw(&self, body: &[u8]) -> Result<RawResponse, AdapterError> {
+        (**self).chat_raw(body).await
+    }
+
+    async fn chat_stream_raw(&self, body: &[u8]) -> Result<RawResponse, AdapterError> {
+        (**self).chat_stream_raw(body).await
     }
 }
