@@ -16,7 +16,7 @@ use axum::{
 };
 use futures::StreamExt;
 
-use crate::adapter::AdapterError;
+use crate::adapter::{AdapterError, Protocol};
 #[cfg(feature = "openai-responses")]
 use crate::entry::openai_responses;
 use crate::entry::{anthropic, openai};
@@ -683,6 +683,63 @@ fn set_cache_control_if_missing(block: &mut ContentBlock, cache_control: serde_j
     }
 }
 
+/// Lightweight struct to extract just model and stream from a request body.
+#[derive(serde::Deserialize)]
+struct ModelAndStream {
+    model: String,
+    #[serde(default)]
+    stream: bool,
+}
+
+/// Attempt a raw passthrough if the entry protocol matches the backend protocol
+/// and no model rewrite is needed. Returns `Ok(Some(response))` on success,
+/// `Ok(None)` if passthrough is not applicable (caller should use the normal
+/// IR path), or `Err` if the passthrough request itself failed.
+async fn try_passthrough(
+    state: &Arc<AppState>,
+    body: &Bytes,
+    entry_protocol: Protocol,
+    request_id: &str,
+) -> Result<Option<axum::response::Response>, AppError> {
+    // Minimal parse: only need model to resolve the route.
+    let meta: ModelAndStream =
+        serde_json::from_slice(body).map_err(|e| AppError::bad_request(e.to_string()))?;
+
+    let route = state
+        .router
+        .resolve(&meta.model)
+        .map_err(AppError::from_adapter)?;
+
+    // Passthrough only when: same protocol, no model rewrite, no fallbacks.
+    if route.adapter.protocol() != entry_protocol
+        || route.model_rewritten
+        || !route.fallbacks.is_empty()
+    {
+        return Ok(None);
+    }
+
+    info!(
+        request_id = %request_id,
+        entry = ?entry_protocol,
+        model = %meta.model,
+        provider = %route.provider,
+        stream = meta.stream,
+        "using raw passthrough"
+    );
+    state
+        .metrics
+        .inc_labeled_request(&route.provider, &meta.model);
+
+    let raw = if meta.stream {
+        route.adapter.chat_stream_raw(body).await
+    } else {
+        route.adapter.chat_raw(body).await
+    }
+    .map_err(AppError::from_adapter)?;
+
+    Ok(Some(raw.into_axum()))
+}
+
 // ── OpenAI-compatible endpoint ──────────────────────────────────────────────
 
 async fn openai_chat_handler(
@@ -694,6 +751,12 @@ async fn openai_chat_handler(
     let _guards = preflight(&state, &headers, body.len())?;
     state.metrics.inc_requests();
     let request_id = request_id(&headers);
+
+    // Fast path: raw passthrough when protocol matches.
+    if let Some(resp) = try_passthrough(&state, &body, Protocol::OpenAI, &request_id).await? {
+        return Ok(resp);
+    }
+
     let body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| AppError::bad_request(e.to_string()))?;
     let openai_req: openai::OpenAIChatRequest =
@@ -868,6 +931,14 @@ async fn responses_handler(
     let _guards = preflight(&state, &headers, body.len())?;
     state.metrics.inc_requests();
     let request_id = request_id(&headers);
+
+    // Fast path: raw passthrough when protocol matches.
+    if let Some(resp) =
+        try_passthrough(&state, &body, Protocol::OpenAIResponses, &request_id).await?
+    {
+        return Ok(resp);
+    }
+
     let body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| AppError::bad_request(e.to_string()))?;
     let resp_req: openai_responses::ResponsesRequest =
@@ -1124,6 +1195,12 @@ async fn anthropic_messages_handler(
     let _guards = preflight(&state, &headers, body.len())?;
     state.metrics.inc_requests();
     let request_id = request_id(&headers);
+
+    // Fast path: raw passthrough when protocol matches.
+    if let Some(resp) = try_passthrough(&state, &body, Protocol::Anthropic, &request_id).await? {
+        return Ok(resp);
+    }
+
     let body: serde_json::Value =
         serde_json::from_slice(&body).map_err(|e| AppError::bad_request(e.to_string()))?;
     let anthro_req: anthropic::AnthropicMessageRequest =
@@ -2128,6 +2205,10 @@ mod tests {
             true
         }
 
+        fn protocol(&self) -> crate::adapter::Protocol {
+            crate::adapter::Protocol::OpenAI
+        }
+
         async fn chat(&self, request: &ir::ChatRequest) -> Result<ir::ChatResponse, AdapterError> {
             if self.fail {
                 return Err(AdapterError::BackendError("primary failed".into()));
@@ -2172,6 +2253,10 @@ mod tests {
 
         fn supports_model(&self, _model: &str) -> bool {
             true
+        }
+
+        fn protocol(&self) -> crate::adapter::Protocol {
+            crate::adapter::Protocol::OpenAI
         }
 
         async fn chat(&self, request: &ir::ChatRequest) -> Result<ir::ChatResponse, AdapterError> {

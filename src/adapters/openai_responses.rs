@@ -444,6 +444,10 @@ impl Adapter for OpenaiResponsesAdapter {
         self.base_url.update(new_url);
     }
 
+    fn protocol(&self) -> crate::adapter::Protocol {
+        crate::adapter::Protocol::OpenAIResponses
+    }
+
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, AdapterError> {
         let native = ir_to_responses_request(request);
         let base_url = self.base_url.read();
