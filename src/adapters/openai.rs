@@ -805,6 +805,74 @@ impl Adapter for OpenaiAdapter {
         self.base_url.update(new_url);
     }
 
+    fn protocol(&self) -> crate::adapter::Protocol {
+        crate::adapter::Protocol::OpenAI
+    }
+
+    async fn chat_raw(&self, body: &[u8]) -> Result<crate::adapter::RawResponse, AdapterError> {
+        let url = format!("{}/v1/chat/completions", self.base_url.read());
+        info!(provider = "openai", "sending raw passthrough request");
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key.read()))
+            .header("content-type", "application/json")
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| AdapterError::BackendError(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let resp_body = resp
+            .bytes()
+            .await
+            .map_err(|e| AdapterError::BackendError(e.to_string()))?;
+        Ok(crate::adapter::RawResponse {
+            status,
+            headers,
+            body: resp_body.to_vec(),
+        })
+    }
+
+    async fn chat_stream_raw(
+        &self,
+        body: &[u8],
+    ) -> Result<crate::adapter::RawResponse, AdapterError> {
+        let url = format!("{}/v1/chat/completions", self.base_url.read());
+        info!(
+            provider = "openai",
+            "sending raw passthrough streaming request"
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key.read()))
+            .header("content-type", "application/json")
+            .body(body.to_vec())
+            .send()
+            .await
+            .map_err(|e| AdapterError::BackendError(e.to_string()))?;
+        let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let resp_body = resp
+            .bytes()
+            .await
+            .map_err(|e| AdapterError::BackendError(e.to_string()))?;
+        Ok(crate::adapter::RawResponse {
+            status,
+            headers,
+            body: resp_body.to_vec(),
+        })
+    }
+
     async fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, AdapterError> {
         let native = ir_to_openai_request(request);
         let url = format!("{}/v1/chat/completions", self.base_url.read());

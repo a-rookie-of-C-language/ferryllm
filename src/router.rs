@@ -11,6 +11,8 @@ pub struct ResolvedRoute {
     pub provider: String,
     pub model: String,
     pub fallbacks: Vec<ResolvedFallback>,
+    /// Whether the model name was rewritten by a route rule.
+    pub model_rewritten: bool,
 }
 
 pub struct ResolvedFallback {
@@ -156,6 +158,7 @@ impl Router {
                         .rewrite_model
                         .clone()
                         .unwrap_or_else(|| model.to_string());
+                    let model_rewritten = route.rewrite_model.is_some();
                     let fallbacks = route
                         .fallback_providers
                         .iter()
@@ -173,6 +176,7 @@ impl Router {
                         provider: route.provider.clone(),
                         model: rewritten,
                         fallbacks,
+                        model_rewritten,
                     });
                 }
             }
@@ -187,6 +191,7 @@ impl Router {
                     provider: adapter.provider_name().to_string(),
                     model: model.to_string(),
                     fallbacks: Vec::new(),
+                    model_rewritten: false,
                 });
             }
         }
@@ -200,6 +205,7 @@ impl Router {
                     provider: default.clone(),
                     model: model.to_string(),
                     fallbacks: Vec::new(),
+                    model_rewritten: false,
                 });
             }
         }
@@ -266,6 +272,10 @@ mod tests {
 
         fn supports_model(&self, _model: &str) -> bool {
             false
+        }
+
+        fn protocol(&self) -> crate::adapter::Protocol {
+            crate::adapter::Protocol::OpenAI
         }
 
         async fn chat(
