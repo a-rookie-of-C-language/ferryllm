@@ -370,7 +370,7 @@ const providerRuntimeRules: ProviderRuntimeRule[] = [
   {
     markers: ["dstopology", "api.dstopology.com"],
     clientModelRewrites: {
-      "claude-sonnet-4-5": "gpt-5.5",
+      "claude-sonnet-4-5": "gpt-5.4",
     },
   },
 ];
@@ -403,12 +403,16 @@ function findProviderRuntimeRule(provider: ProviderConfig): ProviderRuntimeRule 
   return providerRuntimeRules.find((rule) => rule.markers.some((marker) => id.includes(marker)));
 }
 
-function runtimeConfigForGateway(c: AppConfig): AppConfig {
+function runtimeConfigForGateway(c: AppConfig, selectedProviderName?: string): AppConfig {
   const next = cloneConfig(c);
   next.providers = next.providers ?? [];
-  if (!(next.routes ?? []).length && next.providers.length === 1 && next.providers[0].name) {
-    const provider = next.providers[0];
-    next.routes = defaultRoutesForProvider(provider);
+  if (!(next.routes ?? []).length && next.providers.length > 0) {
+    const provider = next.providers.find((item) => item.name === selectedProviderName)
+      ?? (next.providers.length === 1 ? next.providers[0] : undefined)
+      ?? next.providers[0];
+    if (provider?.name) {
+      next.routes = defaultRoutesForProvider(provider);
+    }
   }
   return next;
 }
@@ -1068,8 +1072,9 @@ function App() {
   }
 
   async function persistRunnableConfig(hotReloadConfig = false): Promise<SaveResult> {
+    const activeProviderName = selectedProviderConfig?.name?.trim() || undefined;
     return await invoke<SaveResult>("save_config_file", {
-      request: { path: "", config: runtimeConfigForGateway(config), executable, hot_reload: hotReloadConfig },
+      request: { path: "", config: runtimeConfigForGateway(config, activeProviderName), executable, hot_reload: hotReloadConfig },
     });
   }
 
