@@ -1380,7 +1380,7 @@ function App() {
   }
 
   async function ensureGatewayRunning(): Promise<boolean> {
-    const saved = await persistRunnableConfig(true);
+    const saved = await persistRunnableConfig(false);
     setValidation(saved.validation);
     if (!saved.validation.ok) {
       addToast(commandResultMessage(saved.validation), "error");

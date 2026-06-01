@@ -153,6 +153,7 @@ fn claude_setting_sources_arg() -> &'static str {
 
 fn launch_args(
     tool: &str,
+    listen: &str,
     client_model: Option<&str>,
     client_reasoning_effort: Option<&str>,
 ) -> Vec<String> {
@@ -164,7 +165,9 @@ fn launch_args(
             normalized_client_model(tool, client_model),
         ],
         "codex" => {
-            let mut args = vec!["--model".into(), normalized_client_model(tool, client_model)];
+            let mut args = codex_gateway_config_args(listen);
+            args.push("--model".into());
+            args.push(normalized_client_model(tool, client_model));
             if let Some(effort) = normalized_reasoning_effort(client_reasoning_effort) {
                 args.push("-c".into());
                 args.push(format!("model_reasoning_effort={effort}"));
@@ -173,6 +176,30 @@ fn launch_args(
         }
         _ => Vec::new(),
     }
+}
+
+fn gateway_host(listen: &str) -> String {
+    if listen.starts_with("0.0.0.0") {
+        listen.replace("0.0.0.0", "127.0.0.1")
+    } else {
+        listen.to_string()
+    }
+}
+
+fn codex_gateway_config_args(listen: &str) -> Vec<String> {
+    let base_url = format!("http://{}/v1", gateway_host(listen));
+    vec![
+        "-c".into(),
+        "model_provider=ferryllm".into(),
+        "-c".into(),
+        "model_providers.ferryllm.name=ferryllm".into(),
+        "-c".into(),
+        "model_providers.ferryllm.wire_api=responses".into(),
+        "-c".into(),
+        format!("model_providers.ferryllm.base_url={base_url}"),
+        "-c".into(),
+        "model_providers.ferryllm.requires_openai_auth=true".into(),
+    ]
 }
 
 fn normalized_client_model(tool: &str, client_model: Option<&str>) -> String {
@@ -516,6 +543,7 @@ fn launch_cli_inner(request: LaunchRequest) -> Result<(), String> {
     let cli_cmd = cli_command(&request.tool);
     let args = launch_args(
         &request.tool,
+        &request.listen,
         request.client_model.as_deref(),
         request.client_reasoning_effort.as_deref(),
     );
@@ -588,10 +616,12 @@ fn resume_ai_session_inner(request: ResumeSessionRequest) -> Result<(), String> 
             request.id.clone(),
         ],
         "codex" => {
-            let mut args = vec![
-                "--model".into(),
-                normalized_client_model(&request.tool, request.client_model.as_deref()),
-            ];
+            let mut args = codex_gateway_config_args(&request.listen);
+            args.push("--model".into());
+            args.push(normalized_client_model(
+                &request.tool,
+                request.client_model.as_deref(),
+            ));
             if let Some(effort) =
                 normalized_reasoning_effort(request.client_reasoning_effort.as_deref())
             {
@@ -956,11 +986,7 @@ fn client_gateway_env(
     client_model: Option<&str>,
     client_reasoning_effort: Option<&str>,
 ) -> Vec<(&'static str, String)> {
-    let host = if listen.starts_with("0.0.0.0") {
-        listen.replace("0.0.0.0", "127.0.0.1")
-    } else {
-        listen.to_string()
-    };
+    let host = gateway_host(listen);
     let model = normalized_client_model(tool, client_model);
     match tool {
         "claude" => {
@@ -2265,4 +2291,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_launch_args_force_local_ferryllm_provider() {
+        let args = launch_args("codex", "127.0.0.1:3000", Some("gpt-5.4--ferryllm-test"), None);
+
+        assert!(args.contains(&"model_provider=ferryllm".to_string()));
+        assert!(args.contains(
+            &"model_providers.ferryllm.base_url=http://127.0.0.1:3000/v1".to_string()
+        ));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair[0] == "--model" && pair[1] == "gpt-5.4--ferryllm-test"));
+    }
+
+    #[test]
+    fn gateway_host_normalizes_wildcard_listen_address() {
+        let args = codex_gateway_config_args("0.0.0.0:3000");
+
+        assert!(args.contains(
+            &"model_providers.ferryllm.base_url=http://127.0.0.1:3000/v1".to_string()
+        ));
+    }
 }
