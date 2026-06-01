@@ -133,7 +133,7 @@ pong
 
 The desktop app is the main ferryllm experience.
 
-![ferryllm desktop provider overview](docs/assets/gui-main.png)
+![ferryllm desktop launcher](docs/images/desktop-launcher.png)
 
 It includes:
 
@@ -154,9 +154,9 @@ to a `ferryllm` executable on `PATH`. Launcher actions start Codex, Claude Code,
 OpenCode, or VS Code with `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, model aliases,
 and reasoning defaults pointing at the local gateway.
 
-![ferryllm desktop launcher](docs/assets/gui-launcher.png)
+![ferryllm desktop providers](docs/images/desktop-providers.png)
 
-![ferryllm desktop provider settings](docs/assets/gui-provider-detail.png)
+![ferryllm desktop dashboard](docs/images/desktop-dashboard.png)
 
 See [docs/claude-code.md](docs/claude-code.md) for persistent Claude Code and cc-switch setup.
 

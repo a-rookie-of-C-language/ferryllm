@@ -134,7 +134,7 @@ pong
 
 桌面端是 ferryllm 的主要使用入口。
 
-![ferryllm 桌面端 provider 概览](docs/assets/gui-main.png)
+![ferryllm 桌面端 launcher](docs/images/desktop-launcher.png)
 
 它包含：
 
@@ -154,9 +154,9 @@ ferryllm serve --config <generated-config.toml>
 里的 `ferryllm`。Launcher 会启动 Codex、Claude Code、OpenCode 或 VS Code，并把
 `OPENAI_BASE_URL`、`ANTHROPIC_BASE_URL`、模型 alias 和 reasoning 默认值指向本地网关。
 
-![ferryllm 桌面端 launcher](docs/assets/gui-launcher.png)
+![ferryllm 桌面端 providers](docs/images/desktop-providers.png)
 
-![ferryllm 桌面端 provider 设置](docs/assets/gui-provider-detail.png)
+![ferryllm 桌面端 dashboard](docs/images/desktop-dashboard.png)
 
 更多 Claude Code 和 cc-switch 配置见 [docs/claude-code.md](docs/claude-code.md)。
 
