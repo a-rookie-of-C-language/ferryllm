@@ -250,10 +250,13 @@ fn parse_anthropic_reasoning(req: &AnthropicMessageRequest) -> Option<ReasoningC
 
 fn reasoning_effort_from_budget(budget_tokens: u32) -> ReasoningEffort {
     match budget_tokens {
-        0..=2047 => ReasoningEffort::Low,
+        0..=511 => ReasoningEffort::Minimal,
+        512..=2047 => ReasoningEffort::Low,
         2048..=8191 => ReasoningEffort::Medium,
         8192..=16383 => ReasoningEffort::High,
-        _ => ReasoningEffort::XHigh,
+        16384..=32767 => ReasoningEffort::XHigh,
+        32768..=65535 => ReasoningEffort::Max,
+        _ => ReasoningEffort::Ultracode,
     }
 }
 
@@ -347,10 +350,16 @@ fn anthropic_content_to_blocks(content: &AnthropicContent) -> Vec<ContentBlock> 
                         Value::String(s) => s.clone(),
                         Value::Array(parts) => parts
                             .iter()
-                            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                            .filter_map(|p| {
+                                p.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(str::to_string)
+                                    .or_else(|| serde_json::to_string(p).ok())
+                            })
                             .collect::<Vec<_>>()
-                            .join(""),
-                        _ => String::new(),
+                            .join("\n"),
+                        Value::Null => String::new(),
+                        other => serde_json::to_string(other).unwrap_or_default(),
                     };
                     ContentBlock::ToolResult {
                         id: tool_use_id.clone(),
@@ -670,6 +679,40 @@ mod tests {
                 assert_eq!(id, "toolu_abc");
                 assert_eq!(content, "file contents");
                 assert!(!is_error);
+            }
+            other => panic!("expected tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn anthropic_tool_result_preserves_non_text_json() {
+        let raw = json!({
+            "model": "claude-sonnet-4-5",
+            "max_tokens": 128,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_json",
+                            "content": [
+                                {"type": "text", "text": "first"},
+                                {"type": "json", "value": {"ok": true}}
+                            ]
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let request: AnthropicMessageRequest = serde_json::from_value(raw).expect("parse request");
+        let ir = anthropic_to_ir(&request);
+
+        match &ir.messages[0].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert!(content.contains("first"));
+                assert!(content.contains("\"ok\":true"));
             }
             other => panic!("expected tool result, got {other:?}"),
         }

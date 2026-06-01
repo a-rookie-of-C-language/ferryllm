@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use axum::{
     body::Bytes,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{sse::Event, IntoResponse, Sse},
     routing::post,
     Router,
@@ -21,7 +21,7 @@ use crate::adapter::{AdapterError, Protocol};
 use crate::entry::openai_responses;
 use crate::entry::{anthropic, openai};
 use crate::ir::{self, ContentBlock, ReasoningControl};
-use crate::router::{ResolvedFallback, Router as ModelRouter};
+use crate::router::{ResolvedFallback, ResolvedRoute, Router as ModelRouter};
 use crate::token_observability;
 use crate::token_observability::DEBUG_REQUEST_SHAPE_FLAG;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -79,6 +79,8 @@ pub struct ServerOptions {
     pub per_key_max_concurrent_requests: Option<usize>,
     pub metrics_enabled: bool,
     pub default_reasoning_effort: Option<ir::ReasoningEffort>,
+    pub max_reasoning_effort: Option<ir::ReasoningEffort>,
+    pub reasoning_policy: ReasoningPolicy,
     pub prompt_cache: PromptCacheOptions,
 }
 
@@ -99,9 +101,20 @@ impl Default for ServerOptions {
             per_key_max_concurrent_requests: None,
             metrics_enabled: true,
             default_reasoning_effort: None,
+            max_reasoning_effort: None,
+            reasoning_policy: ReasoningPolicy::default(),
             prompt_cache: PromptCacheOptions::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum ReasoningPolicy {
+    Preserve,
+    #[default]
+    FillMissing,
+    Cap,
+    Force,
 }
 
 #[derive(Clone, Debug)]
@@ -663,15 +676,93 @@ fn apply_request_shape_debug_policy(req: &mut ir::ChatRequest, options: &PromptC
     }
 }
 
-fn apply_default_reasoning_policy(req: &mut ir::ChatRequest, options: &ServerOptions) {
-    if req.reasoning.is_none() {
-        if let Some(effort) = &options.default_reasoning_effort {
-            req.reasoning = Some(ReasoningControl {
-                effort: effort.clone(),
-                budget_tokens: None,
-            });
+#[derive(Debug)]
+struct ReasoningPolicyObservation {
+    requested: Option<ir::ReasoningEffort>,
+    applied: Option<ir::ReasoningEffort>,
+}
+
+fn apply_reasoning_policy(
+    req: &mut ir::ChatRequest,
+    options: &ServerOptions,
+) -> ReasoningPolicyObservation {
+    let requested = req
+        .reasoning
+        .as_ref()
+        .map(|reasoning| reasoning.effort.clone());
+    match options.reasoning_policy {
+        ReasoningPolicy::Preserve => {}
+        ReasoningPolicy::FillMissing => {
+            if req.reasoning.is_none() {
+                set_reasoning_effort(req, options.default_reasoning_effort.clone());
+            }
+        }
+        ReasoningPolicy::Cap => {
+            if req.reasoning.is_none() {
+                set_reasoning_effort(req, options.default_reasoning_effort.clone());
+            }
+            if let (Some(reasoning), Some(max_effort)) = (
+                req.reasoning.as_mut(),
+                options.max_reasoning_effort.as_ref(),
+            ) {
+                if reasoning_effort_rank(&reasoning.effort) > reasoning_effort_rank(max_effort) {
+                    reasoning.effort = max_effort.clone();
+                    reasoning.budget_tokens = None;
+                }
+            }
+        }
+        ReasoningPolicy::Force => {
+            set_reasoning_effort(
+                req,
+                options
+                    .default_reasoning_effort
+                    .clone()
+                    .or_else(|| options.max_reasoning_effort.clone()),
+            );
         }
     }
+    ReasoningPolicyObservation {
+        requested,
+        applied: req
+            .reasoning
+            .as_ref()
+            .map(|reasoning| reasoning.effort.clone()),
+    }
+}
+
+fn set_reasoning_effort(req: &mut ir::ChatRequest, effort: Option<ir::ReasoningEffort>) {
+    req.reasoning = effort.map(|effort| ReasoningControl {
+        effort,
+        budget_tokens: None,
+    });
+}
+
+fn reasoning_effort_rank(effort: &ir::ReasoningEffort) -> u8 {
+    match effort {
+        ir::ReasoningEffort::None => 0,
+        ir::ReasoningEffort::Minimal => 1,
+        ir::ReasoningEffort::Low => 2,
+        ir::ReasoningEffort::Medium => 3,
+        ir::ReasoningEffort::High => 4,
+        ir::ReasoningEffort::XHigh => 5,
+        ir::ReasoningEffort::Max => 6,
+        ir::ReasoningEffort::Ultracode => 7,
+    }
+}
+
+fn attach_user_agent(headers: &HeaderMap, req: &mut ir::ChatRequest) {
+    let Some(user_agent) = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    req.extra.insert(
+        ir::EXTRA_HTTP_USER_AGENT.into(),
+        serde_json::Value::String(user_agent.to_string()),
+    );
 }
 
 fn is_cacheable_block(block: &&mut ContentBlock) -> bool {
@@ -722,6 +813,72 @@ struct ModelAndStream {
     stream: bool,
 }
 
+fn resolve_route(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+    model: &str,
+) -> Result<ResolvedRoute, AdapterError> {
+    let resolved = state.router.resolve(model)?;
+    if resolved.model_rewritten {
+        return Ok(resolved);
+    }
+    let Some(provider) = client_provider_hint(headers) else {
+        return Ok(resolved);
+    };
+    match state.router.resolve_for_provider(&provider, model) {
+        Ok(route) => Ok(route),
+        Err(err) => {
+            trace!(
+                provider = %provider,
+                model = %model,
+                error = %err,
+                "client provider hint could not be applied; using normal route"
+            );
+            Ok(resolved)
+        }
+    }
+}
+
+fn client_provider_hint(headers: &HeaderMap) -> Option<String> {
+    const PREFIX: &str = "ferryllm-provider:";
+    raw_client_api_key(headers)
+        .and_then(|key| key.strip_prefix(PREFIX))
+        .and_then(hex_decode_utf8)
+}
+
+fn raw_client_api_key(headers: &HeaderMap) -> Option<&str> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let x_api_key = headers
+        .get("x-api-key")
+        .and_then(|value| value.to_str().ok());
+    bearer.into_iter().chain(x_api_key).next()
+}
+
+fn hex_decode_utf8(raw: &str) -> Option<String> {
+    if !raw.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(raw.len() / 2);
+    for pair in raw.as_bytes().chunks_exact(2) {
+        let hi = hex_value(pair[0])?;
+        let lo = hex_value(pair[1])?;
+        bytes.push((hi << 4) | lo);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 /// Attempt a raw passthrough if the entry protocol matches the backend protocol
 /// and no model rewrite is needed. Returns `Ok(Some(response))` on success,
 /// `Ok(None)` if passthrough is not applicable (caller should use the normal
@@ -729,6 +886,7 @@ struct ModelAndStream {
 async fn try_passthrough(
     state: &Arc<AppState>,
     body: &Bytes,
+    headers: &HeaderMap,
     entry_protocol: Protocol,
     request_id: &str,
 ) -> Result<Option<axum::response::Response>, AppError> {
@@ -736,10 +894,7 @@ async fn try_passthrough(
     let meta: ModelAndStream =
         serde_json::from_slice(body).map_err(|e| AppError::bad_request(e.to_string()))?;
 
-    let route = state
-        .router
-        .resolve(&meta.model)
-        .map_err(AppError::from_adapter)?;
+    let route = resolve_route(state, headers, &meta.model).map_err(AppError::from_adapter)?;
 
     // Passthrough only when: same protocol, no model rewrite, no fallbacks.
     if route.adapter.protocol() != entry_protocol
@@ -757,16 +912,31 @@ async fn try_passthrough(
         stream = meta.stream,
         "using raw passthrough"
     );
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    let raw_result = if meta.stream {
+        route.adapter.chat_stream_raw(body, user_agent).await
+    } else {
+        route.adapter.chat_raw(body, user_agent).await
+    };
+    let raw = match raw_result {
+        Ok(raw) => raw,
+        Err(AdapterError::UnsupportedFeature { provider, feature }) => {
+            trace!(
+                request_id = %request_id,
+                provider = %provider,
+                feature = %feature,
+                "raw passthrough unsupported; falling back to translated request path"
+            );
+            return Ok(None);
+        }
+        Err(err) => return Err(AppError::from_adapter(err)),
+    };
+
     state
         .metrics
         .inc_labeled_request(&route.provider, &meta.model);
-
-    let raw = if meta.stream {
-        route.adapter.chat_stream_raw(body).await
-    } else {
-        route.adapter.chat_raw(body).await
-    }
-    .map_err(AppError::from_adapter)?;
 
     Ok(Some(raw.into_axum()))
 }
@@ -784,7 +954,9 @@ async fn openai_chat_handler(
     let request_id = request_id(&headers);
 
     // Fast path: raw passthrough when protocol matches.
-    if let Some(resp) = try_passthrough(&state, &body, Protocol::OpenAI, &request_id).await? {
+    if let Some(resp) =
+        try_passthrough(&state, &body, &headers, Protocol::OpenAI, &request_id).await?
+    {
         return Ok(resp);
     }
 
@@ -794,19 +966,18 @@ async fn openai_chat_handler(
         serde_json::from_value(body).map_err(|e| AppError::bad_request(e.to_string()))?;
     let stream = openai_req.stream;
     let mut ir_req = openai::openai_to_ir(&openai_req);
+    attach_user_agent(&headers, &mut ir_req);
     strip_system_line_prefixes(&mut ir_req, &state.options.prompt_cache);
     relocate_system_prefix_context(&mut ir_req, &state.options.prompt_cache);
     let prompt_observation = estimate_prompt_observation(&ir_req);
     info!(request_id = %request_id, entry = "openai", model = %ir_req.model, stream, "incoming request");
-    let route = state
-        .router
-        .resolve(&ir_req.model)
-        .map_err(AppError::from_adapter)?;
+    let route = resolve_route(&state, &headers, &ir_req.model).map_err(AppError::from_adapter)?;
 
     // Apply model rewrite so the backend sees the correct model name.
     let display_model = ir_req.model.clone();
     ir_req.model = route.model;
-    apply_default_reasoning_policy(&mut ir_req, &state.options);
+    let reasoning = apply_reasoning_policy(&mut ir_req, &state.options);
+    info!(request_id = %request_id, entry = "openai", requested_reasoning = ?reasoning.requested, applied_reasoning = ?reasoning.applied, "applied reasoning policy");
     apply_openai_prompt_cache_policy(&mut ir_req, &state.options.prompt_cache);
     apply_request_shape_debug_policy(&mut ir_req, &state.options.prompt_cache);
     let fallback_count = route.fallbacks.len();
@@ -964,8 +1135,14 @@ async fn responses_handler(
     let request_id = request_id(&headers);
 
     // Fast path: raw passthrough when protocol matches.
-    if let Some(resp) =
-        try_passthrough(&state, &body, Protocol::OpenAIResponses, &request_id).await?
+    if let Some(resp) = try_passthrough(
+        &state,
+        &body,
+        &headers,
+        Protocol::OpenAIResponses,
+        &request_id,
+    )
+    .await?
     {
         return Ok(resp);
     }
@@ -977,18 +1154,17 @@ async fn responses_handler(
     let stream = resp_req.stream;
     let mut ir_req =
         openai_responses::responses_to_ir_with_cache(&resp_req, Some(&state.tool_call_cache));
+    attach_user_agent(&headers, &mut ir_req);
     strip_system_line_prefixes(&mut ir_req, &state.options.prompt_cache);
     relocate_system_prefix_context(&mut ir_req, &state.options.prompt_cache);
     let prompt_observation = estimate_prompt_observation(&ir_req);
     info!(request_id = %request_id, entry = "responses", model = %ir_req.model, stream, "incoming request");
-    let route = state
-        .router
-        .resolve(&ir_req.model)
-        .map_err(AppError::from_adapter)?;
+    let route = resolve_route(&state, &headers, &ir_req.model).map_err(AppError::from_adapter)?;
 
     let display_model = ir_req.model.clone();
     ir_req.model = route.model;
-    apply_default_reasoning_policy(&mut ir_req, &state.options);
+    let reasoning = apply_reasoning_policy(&mut ir_req, &state.options);
+    info!(request_id = %request_id, entry = "responses", requested_reasoning = ?reasoning.requested, applied_reasoning = ?reasoning.applied, "applied reasoning policy");
     apply_openai_prompt_cache_policy(&mut ir_req, &state.options.prompt_cache);
     apply_request_shape_debug_policy(&mut ir_req, &state.options.prompt_cache);
     let fallback_count = route.fallbacks.len();
@@ -1146,7 +1322,9 @@ async fn handle_responses_stream(
                             if let Ok(item) = serde_json::from_str::<serde_json::Value>(data) {
                                 if item["item"]["type"].as_str() == Some("function_call") {
                                     if let (Some(id), Some(name), Some(args)) = (
-                                        item["item"]["id"].as_str(),
+                                        item["item"]["call_id"]
+                                            .as_str()
+                                            .or_else(|| item["item"]["id"].as_str()),
                                         item["item"]["name"].as_str(),
                                         item["item"]["arguments"].as_str(),
                                     ) {
@@ -1228,7 +1406,9 @@ async fn anthropic_messages_handler(
     let request_id = request_id(&headers);
 
     // Fast path: raw passthrough when protocol matches.
-    if let Some(resp) = try_passthrough(&state, &body, Protocol::Anthropic, &request_id).await? {
+    if let Some(resp) =
+        try_passthrough(&state, &body, &headers, Protocol::Anthropic, &request_id).await?
+    {
         return Ok(resp);
     }
 
@@ -1238,20 +1418,19 @@ async fn anthropic_messages_handler(
         serde_json::from_value(body).map_err(|e| AppError::bad_request(e.to_string()))?;
     let stream = anthro_req.stream;
     let mut ir_req = anthropic::anthropic_to_ir(&anthro_req);
+    attach_user_agent(&headers, &mut ir_req);
     strip_system_line_prefixes(&mut ir_req, &state.options.prompt_cache);
     relocate_system_prefix_context(&mut ir_req, &state.options.prompt_cache);
     apply_anthropic_prompt_cache_policy(&mut ir_req, &state.options.prompt_cache);
     let prompt_observation = estimate_prompt_observation(&ir_req);
     info!(request_id = %request_id, entry = "anthropic", model = %ir_req.model, stream, "incoming request");
-    let route = state
-        .router
-        .resolve(&ir_req.model)
-        .map_err(AppError::from_adapter)?;
+    let route = resolve_route(&state, &headers, &ir_req.model).map_err(AppError::from_adapter)?;
 
     // Apply model rewrite.
     let display_model = ir_req.model.clone();
     ir_req.model = route.model;
-    apply_default_reasoning_policy(&mut ir_req, &state.options);
+    let reasoning = apply_reasoning_policy(&mut ir_req, &state.options);
+    info!(request_id = %request_id, entry = "anthropic", requested_reasoning = ?reasoning.requested, applied_reasoning = ?reasoning.applied, "applied reasoning policy");
     apply_openai_prompt_cache_policy(&mut ir_req, &state.options.prompt_cache);
     apply_request_shape_debug_policy(&mut ir_req, &state.options.prompt_cache);
     let fallback_count = route.fallbacks.len();
@@ -2226,6 +2405,8 @@ mod tests {
         failures_before_success: AtomicU64,
     }
 
+    struct RawUnsupportedResponsesAdapter;
+
     #[async_trait]
     impl crate::adapter::Adapter for TestAdapter {
         fn provider_name(&self) -> &str {
@@ -2326,6 +2507,67 @@ mod tests {
         > {
             Ok(Box::pin(stream::empty()))
         }
+    }
+
+    #[async_trait]
+    impl crate::adapter::Adapter for RawUnsupportedResponsesAdapter {
+        fn provider_name(&self) -> &str {
+            "raw-unsupported"
+        }
+
+        fn supports_model(&self, _model: &str) -> bool {
+            true
+        }
+
+        fn protocol(&self) -> crate::adapter::Protocol {
+            crate::adapter::Protocol::OpenAIResponses
+        }
+
+        async fn chat(&self, request: &ir::ChatRequest) -> Result<ir::ChatResponse, AdapterError> {
+            Ok(ir::ChatResponse {
+                id: "resp_1".into(),
+                model: request.model.clone(),
+                choices: Vec::new(),
+                usage: ir::Usage::default(),
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: &ir::ChatRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<dyn futures::Stream<Item = Result<ir::StreamEvent, AdapterError>> + Send>,
+            >,
+            AdapterError,
+        > {
+            Ok(Box::pin(stream::empty()))
+        }
+    }
+
+    #[tokio::test]
+    async fn passthrough_unsupported_feature_falls_back_to_translated_path() {
+        let mut router = ModelRouter::new();
+        router.register_adapter_as("responses", Arc::new(RawUnsupportedResponsesAdapter));
+        let state = Arc::new(AppState::new(
+            router,
+            ServerOptions::default(),
+            Metrics::default(),
+        ));
+        let body = Bytes::from_static(br#"{"model":"gpt-5.4","stream":true}"#);
+
+        let response = try_passthrough(
+            &state,
+            &body,
+            &HeaderMap::new(),
+            Protocol::OpenAIResponses,
+            "req_1",
+        )
+        .await
+        .expect("passthrough decision");
+
+        assert!(response.is_none());
+        assert!(!state.metrics.render().contains("ferryllm_labeled_requests"));
     }
 
     #[tokio::test]
@@ -2660,7 +2902,7 @@ mod tests {
         };
         let mut missing = test_chat_request("gpt-5.4");
 
-        apply_default_reasoning_policy(&mut missing, &options);
+        apply_reasoning_policy(&mut missing, &options);
 
         assert_eq!(
             missing.reasoning,
@@ -2676,13 +2918,39 @@ mod tests {
             budget_tokens: Some(8192),
         });
 
-        apply_default_reasoning_policy(&mut explicit, &options);
+        apply_reasoning_policy(&mut explicit, &options);
 
         assert_eq!(
             explicit.reasoning,
             Some(ir::ReasoningControl {
                 effort: ir::ReasoningEffort::High,
                 budget_tokens: Some(8192),
+            })
+        );
+    }
+
+    #[test]
+    fn cap_reasoning_policy_limits_client_effort() {
+        let options = ServerOptions {
+            reasoning_policy: ReasoningPolicy::Cap,
+            max_reasoning_effort: Some(ir::ReasoningEffort::High),
+            ..ServerOptions::default()
+        };
+        let mut request = test_chat_request("gpt-5.4");
+        request.reasoning = Some(ir::ReasoningControl {
+            effort: ir::ReasoningEffort::XHigh,
+            budget_tokens: Some(16384),
+        });
+
+        let observation = apply_reasoning_policy(&mut request, &options);
+
+        assert_eq!(observation.requested, Some(ir::ReasoningEffort::XHigh));
+        assert_eq!(observation.applied, Some(ir::ReasoningEffort::High));
+        assert_eq!(
+            request.reasoning,
+            Some(ir::ReasoningControl {
+                effort: ir::ReasoningEffort::High,
+                budget_tokens: None,
             })
         );
     }

@@ -258,7 +258,7 @@ label > span {
 
 .launcher-projects {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  grid-template-columns: minmax(620px, 1fr) minmax(280px, 340px);
   align-items: start;
   gap: 18px;
   padding: 18px 32px 32px;
@@ -302,7 +302,7 @@ label > span {
 }
 
 .launcher-gateway-select {
-  max-width: 128px;
+  width: clamp(92px, 10vw, 128px);
   height: 30px;
   border: 1px solid var(--c-border);
   border-radius: 7px;
@@ -311,6 +311,31 @@ label > span {
   padding: 0 7px;
   font-size: 11px;
   font-weight: 800;
+}
+
+@media (max-width: 1500px) {
+  .launcher-welcome-header {
+    padding: 22px 24px 18px;
+  }
+
+  .launcher-projects {
+    grid-template-columns: 1fr;
+    padding: 16px 24px 24px;
+  }
+
+  .launcher-project-list {
+    min-height: min(420px, calc(100vh - 166px));
+  }
+
+  .launcher-session-panel {
+    max-height: min(360px, calc(100vh - 166px));
+  }
+}
+
+@media (max-width: 1180px) {
+  .launcher-gateway-select {
+    width: 104px;
+  }
 }
 
 .line-clamp-2 {
