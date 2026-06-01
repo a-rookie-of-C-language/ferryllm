@@ -858,7 +858,7 @@ fn raw_client_api_key(headers: &HeaderMap) -> Option<&str> {
 }
 
 fn hex_decode_utf8(raw: &str) -> Option<String> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(raw.len() / 2);
